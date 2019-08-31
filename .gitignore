@@ -1,5 +1,6 @@
 .*
 !.gitignore
 *.csv
+*.json
 **/*.py[cod]
 rxrx1-utils
