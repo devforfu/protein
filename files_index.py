@@ -6,6 +6,7 @@
 import glob
 import os
 import pickle
+from pudb import set_trace
 import sys
 
 import pandas as pd
@@ -53,6 +54,7 @@ def build_files_index():
 def generate_samples(files_df):
     samples = []
     for _, g in tqdm(files_df.groupby(['id_code', 'site', 'dataset'])):
+        set_trace()
         g = g.sort_values(by='channel')
         sirna = g.sirna.unique().item()
         site = g.site.unique().item()

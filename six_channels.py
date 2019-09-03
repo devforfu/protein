@@ -77,19 +77,22 @@ class RxRxDataset(Dataset):
                  open_fn=PIL.Image.open, tr=None):
 
         super().__init__()
+        
         self.onehot = onehot
         self.label_smoothing = label_smoothing
         self.open_fn = open_fn
         self.tr = tr
-        self.targets = [item['sirna'] for item in items]
-        self.images = [item['images'] for item in items]
+        #self.targets = [item['sirna'] for item in items]
+        #self.images = [item['images'] for item in items]
+        self.items = items
         self.num_classes = len(np.unique(self.targets))
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, index):
-        bunch = self.images[index]
+        bunch = self.items[index]['images']
+        sample = self.items[index].copy()
         channels = []
         for i, filename in sorted(bunch, key=itemgetter(0)):
             img = self.open_fn(filename)
@@ -97,54 +100,83 @@ class RxRxDataset(Dataset):
             channels.append(img)
         sample = torch.cat(channels, dim=0)
         y = self.targets[index]
-        sample = dict(features=sample, targets=y)
+        sample.update(dict(features=sample, targets=y))
         if self.onehot:
             y_enc = get_one_hot(
                 y, smoothing=self.label_smoothing,
                 num_classes=self.num_classes)
             sample['targets_one_hot'] = y_enc
+        from pdb import set_trace
+        set_trace()
         return sample
 
 
-def create_data_loaders(train_records, test_records, batch_size=4):
-    ys = [r['sirna'] for r in train_records]
-    train, valid = train_test_split(train_records, stratify=ys, test_size=0.1)
-    trn_ds = RxRxDataset(train, tr=T.Compose([
-        T.Resize(224),
-        T.ToTensor(),
-        T.Normalize((0.5,), (0.5,))
-    ]))
-    val_ds = RxRxDataset(valid, tr=T.Compose([
-        T.Resize(224),
-        T.ToTensor(),
-        T.Normalize((0.5,), (0.5,))
-    ]))
-    tst_ds = RxRxDataset(test_records, onehot=False, tr=T.Compose([
-        T.Resize(224),
-        T.ToTensor(),
-        T.Normalize((0.5,), (0.5,))
-    ]))
-    trn_dl = DataLoader(
-        trn_ds, shuffle=True,
-        batch_size=batch_size, num_workers=cpu_count())
-    val_dl = DataLoader(
-        val_ds, shuffle=False,
-        batch_size=batch_size, num_workers=cpu_count())
-    tst_dl = DataLoader(
-        tst_ds, shuffle=False,
-        batch_size=batch_size, num_workers=cpu_count())
-    loaders = OrderedDict()
-    loaders['train'] = trn_dl
-    loaders['valid'] = val_dl
-    loaders['test'] = tst_dl
-    return {'loaders': loaders, 'num_classes': NUM_CLASSES}
+class _Split:
+
+    def __init__(self, test_size=0.1, seed=1):
+        self.test_size = test_size
+        self.seed = seed
+
+    def __call__(self, *args, **kwargs):
+        raise NotImplementedError()
 
 
-model_name = 'resnet34'
+class TargetSplit(_Split):
+    def __call__(self, records):
+        ys = [r['sirna'] for r in records]
+        train, valid = train_test_split(
+            records, stratify=ys,
+            test_size=self.test_size,
+            random_state=self.seed)
+        return train, valid
 
 
-def plus_noise(t, std=0.001):
-    return t + torch.randn(t.shape)*std
+class DataBunch:
+
+    def __init__(self, input_size=224, stats=None, aug_raw=None, aug_resized=None):
+        self.input_size = input_size
+        self.stats = stats or {'mean': (0.5,), 'std': (0.5,)}
+        self.aug_raw = aug_raw
+        self.aug_resized = aug_resized
+
+    def create(self, train_records, test_records, **kwargs):
+        trn_dl, val_dl = self.create_train_valid(train_records, **kwargs)
+        tst_dl = self.create_test(test_records, **kwargs)
+        loaders = OrderedDict([('train', trn_dl), ('valid', val_dl), ('test', tst_dl)])
+        return loaders
+
+    def create_train_valid(self, records, batch_size=4, split=None, test_size=0.1):
+        split = split or TargetSplit(test_size)
+        train, valid = split(records)
+        trn_ds = RxRxDataset(train, tr=self.build_tr(True))
+        val_ds = RxRxDataset(valid, tr=self.build_tr(False))
+        trn_dl = self.build_dl(trn_ds, bs=batch_size)
+        val_dl = self.build_dl(val_ds, bs=batch_size, shuffle=False)
+        return trn_dl, val_dl
+
+    def create_test(self, records, batch_size=4):
+        tst_ds = RxRxDataset(records, tr=self.build_tr(False))
+        tst_dl = self.build_dl(tst_ds, bs=batch_size, shuffle=False)
+        return tst_dl
+
+    def build_tr(self, train=True):
+        tr = []
+        if train:
+            if self.aug_raw is not None:
+                tr.extend(self.aug_raw)
+        tr.append(T.Resize(self.input_size))
+        if train:
+            if self.aug_resized is not None:
+                tr.extend(self.aug_resized)
+        tr.append(T.ToTensor())
+        tr.append(T.Normalize(self.stats['mean'], self.stats['std']))
+        return T.Compose(tr)
+
+    def build_dl(self, ds, bs, shuffle=True):
+        return DataLoader(ds, shuffle=shuffle, batch_size=bs, num_workers=cpu_count())
+
+
+model_name = 'resnet50'
 
 
 def get_model(model_name, num_classes, pretrained='imagenet'):
@@ -153,8 +185,8 @@ def get_model(model_name, num_classes, pretrained='imagenet'):
     dim_feats = model.last_linear.in_features
     model.last_linear = nn.Linear(dim_feats, num_classes)
     new_conv = nn.Conv2d(6, 64, 7, 2, 3, bias=False)
-    new_conv.weight.data[:,0:3,:] = plus_noise(model.conv1.weight.data.clone())
-    new_conv.weight.data[:,3:6,:] = plus_noise(model.conv1.weight.data.clone())
+    new_conv.weight.data[:,0:3,:] = model.conv1.weight.data.clone()
+    new_conv.weight.data[:,3:6,:] = model.conv1.weight.data.clone()
     model.conv1 = new_conv
     return model
 
@@ -201,7 +233,7 @@ def train(epochs: int=1,
           batch_size: int=800,
           model_name: str='resnet34',
           logdir: str='/tmp/loops/',
-          lrs: tuple=(1e-5, 1e-3, 5e-3),
+          lrs: tuple=(1e-4, 1e-3, 5e-3),
           eta_min: float=1e-6,
           dev_id: int=1,
           visdom_host: str='0.0.0.0',
@@ -213,27 +245,28 @@ def train(epochs: int=1,
 
     experiment_id = f'{model_name}_e{epochs}_b{batch_size}'
     device = torch.device(f'cuda:{dev_id}')
-    dataset = create_data_loaders(*load_data(), batch_size=batch_size)
-    model = get_model(model_name, dataset['num_classes']).to(device)
+    # dataset = create_data_loaders(*load_data(), batch_size=batch_size)
+    dataset = DataBunch().create(*load_data(), batch_size=batch_size)
+    model = get_model(model_name, NUM_CLASSES).to(device)
     freeze_model(model)
     unfreeze_layers(model, ['conv1', 'bn1', 'layer4', 'last_linear'])
 
     loss_fn = nn.CrossEntropyLoss()
     conv, layer, head = lrs
-    opt = torch.optim.SGD([
+    opt = torch.optim.AdamW([
         {'params': model.conv1.parameters(), 'lr': conv},
         {'params': model.layer4.parameters(), 'lr': layer},
         {'params': model.last_linear.parameters(), 'lr': head}
-    ])
+    ], weight_decay=0.01)
     logdir = os.path.join(logdir, experiment_id)
     sched = CosineAnnealingWarmRestarts(
-        opt, T_0=len(dataset['loaders']['train']), T_mult=2, eta_min=eta_min)
+        opt, T_0=len(dataset['train']), T_mult=2, eta_min=eta_min)
     rolling_loss = RollingLoss()
     os.makedirs(logdir, exist_ok=True)
     iteration = 0
 
     for epoch in range(1, epochs+1):
-        trn_dl = dataset['loaders']['train']
+        trn_dl = dataset['train']
         n = len(trn_dl)
 
         model.train()
@@ -251,7 +284,7 @@ def train(epochs: int=1,
                 out = model(x)
                 loss = loss_fn(out, y)
                 loss.backward()
-                avg_loss = rolling_loss(loss.item(), i+1)
+                avg_loss = rolling_loss(loss.item(), iteration+1)
                 opt.step()
                 sched.step()
                 bar.set_postfix(avg_loss=f'{avg_loss:.3f}')
@@ -259,7 +292,7 @@ def train(epochs: int=1,
                 vis.line(X=[iteration], Y=[avg_loss],
                          win='loss', name='avg_loss', update='append')
 
-        val_dl = dataset['loaders']['valid']
+        val_dl = dataset['valid']
         n = len(val_dl)
 
         model.eval()
@@ -285,72 +318,3 @@ def train(epochs: int=1,
 if __name__ == '__main__':
     if not is_notebook():
         ancli.make_cli(train)
-
-
-epochs = 30
-batch_size = 800
-dataset = create_data_loaders(*load_data(), batch_size=batch_size)
-model = get_model(model_name, dataset['num_classes']).to(device)
-freeze_model(resnet)
-
-for param in resnet.parameters():
-    param.requires_grad = False
-resnet.conv1.requires_grad = False
-resnet.last_linear.weight.requires_grad = True
-for param in resnet.layer4.parameters():
-    param.requires_grad = True
-
-loss_fn = nn.CrossEntropyLoss()
-opt = torch.optim.SGD([
-    {'params': resnet.conv1.parameters(), 'lr': 1e-6},
-    {'params': resnet.layer4.parameters(), 'lr': 1e-3},
-    {'params': resnet.last_linear.parameters(), 'lr': 5e-3}
-])
-
-# logdir = '/tmp/protein/logs/'
-logdir = '/tmp/loops/protein/'
-runner = SupervisedRunner()
-sched = CosineAnnealingWarmRestarts(opt, len(dataset['loaders']['train']), eta_min=1e-7)
-rolling_loss = RollingLoss()
-os.makedirs(logdir, exist_ok=True)
-
-for epoch in range(epochs):
-    trn_dl = dataset['loaders']['train']
-    n = len(trn_dl)
-
-    resnet.train()
-    with tqdm(total=n) as bar:
-        for i, batch in enumerate(trn_dl, 1):
-            bar.set_description(f'[epoch:{epoch}][{i}/{n}]')
-            opt.zero_grad()
-            x = batch['features'].to(device)
-            y = batch['targets'].to(device)
-            out = resnet(x)
-            loss = loss_fn(out, y)
-            loss.backward()
-            avg_loss = rolling_loss(loss.item(), i+1)
-            opt.step()
-            sched.step()
-            bar.set_postfix(avg_loss=f'{avg_loss:.3f}')
-            bar.update(1)
-
-    val_dl = dataset['loaders']['valid']
-    n = len(val_dl)
-
-    resnet.eval()
-    with torch.no_grad():
-        matches = []
-        with tqdm(total=n) as bar:
-            for batch in val_dl:
-                x = batch['features'].to(device)
-                y = batch['targets'].to(device)
-                out = resnet(x)
-                y_pred = out.softmax(dim=1).argmax(dim=1)
-                set_trace()
-                matched = (y == y_pred).detach().cpu().numpy().tolist()
-                matches.extend(matched)
-                bar.update(1)
-        acc = np.mean(matches)
-        print(f'validation accuracy: {acc:2.2%}')
-        acc_str = str(int(round(acc * 10_000, 0)))
-        torch.save(resnet.state_dict(), os.path.join(logdir, f'train.{epoch}.{acc_str}.pth'))
