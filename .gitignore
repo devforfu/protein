@@ -4,3 +4,4 @@
 *.json
 **/*.py[cod]
 rxrx1-utils
+tmp/
