@@ -13,7 +13,7 @@ def load_pickle(filename):
 def train_test(items):
     train, test = [], []
     for item in tqdm(items):
-        subset = item.pop('subset')
+        subset = item.pop('dataset')
         (train if subset == 'train' else test).append(item)
     return train, test
 

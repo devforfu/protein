@@ -25,6 +25,7 @@ def collect_records(basedir):
     """Globs the folder with images and constructs data frame with image paths
     and additional meta-information.
     """
+    print(f'Collecting records from folder: {basedir}.')
     records = []
     columns = ['experiment', 'plate', 'well', 'site', 'channel', 'filename']
     for path in glob.glob(f'{basedir}/**/*.png', recursive=True):
@@ -39,10 +40,13 @@ def collect_records(basedir):
 
 
 def build_files_index():
+    print('Reading training data meta.')
     trn_df = collect_records(TRAIN)
     trn_df['dataset'] = 'train'
+    print('Reading testing data meta.')
     tst_df = collect_records(TEST)
     tst_df['dataset'] = 'test'
+    print('Merging meta-information into single index table.')
     df = pd.concat([trn_df, tst_df], axis='rows')
     keys = ['id_code', 'site', 'dataset']
     df.set_index(keys, inplace=True)
@@ -52,15 +56,16 @@ def build_files_index():
 
 
 def generate_samples(files_df):
+    print('Generating samples.')
     samples = []
-    for (id_code, _, _), g in tqdm(files_df.groupby(['id_code', 'site', 'dataset'])):
+    for _, g in tqdm(files_df.groupby(['id_code', 'site', 'dataset'])):
         g = g.sort_values(by='channel')
-        sirna = g.sirna.unique().item()
-        site = g.site.unique().item()
-        subset = g.dataset.unique().item()
-        label = 0 if pd.isna(sirna) else int(sirna)
+        [sample] = g.drop_duplicates('id_code').to_dict('records')
         images = list(zip(g.channel, g.filename))
-        sample = dict(images=images, sirna=label, site=site, subset=subset, id_code=id_code)
+        sirna = sample['sirna']
+        sample['images'] = images
+        sample['sirna'] = 0 if pd.isna(sirna) else int(sirna)
+        sample.pop('filename')
         samples.append(sample)
     return samples
 
