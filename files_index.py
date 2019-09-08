@@ -53,15 +53,14 @@ def build_files_index():
 
 def generate_samples(files_df):
     samples = []
-    for _, g in tqdm(files_df.groupby(['id_code', 'site', 'dataset'])):
-        set_trace()
+    for (id_code, _, _), g in tqdm(files_df.groupby(['id_code', 'site', 'dataset'])):
         g = g.sort_values(by='channel')
         sirna = g.sirna.unique().item()
         site = g.site.unique().item()
         subset = g.dataset.unique().item()
         label = 0 if pd.isna(sirna) else int(sirna)
         images = list(zip(g.channel, g.filename))
-        sample = dict(images=images, sirna=label, site=site, subset=subset)
+        sample = dict(images=images, sirna=label, site=site, subset=subset, id_code=id_code)
         samples.append(sample)
     return samples
 
